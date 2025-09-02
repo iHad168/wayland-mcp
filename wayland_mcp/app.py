@@ -129,7 +129,7 @@ def _select_region(tool: str) -> Optional[str]:
             logging.warning("xrandr region selection timed out")
     return None
 
-def _try_ksnip(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bool:
+def _try_ksnip(output_path: str, mode: CaptureMode, geometry: Optional[str], include_mouse: bool, env: Dict[str, str]) -> bool:
     """Attempt capture with ksnip (prioritized for stability)."""
     if not shutil.which("ksnip"):
         return False
@@ -145,7 +145,7 @@ def _try_ksnip(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bo
         logging.error("ksnip timed out")
         return False
 
-def _try_gnome_screenshot(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bool:
+def _try_gnome_screenshot(output_path: str, mode: CaptureMode, geometry: Optional[str], include_mouse: bool, env: Dict[str, str]) -> bool:
     """Attempt capture with gnome-screenshot (fallback for GNOME)."""
     if not shutil.which("gnome-screenshot"):
         return False
@@ -161,7 +161,7 @@ def _try_gnome_screenshot(output_path: str, include_mouse: bool, env: Dict[str, 
         logging.error("gnome-screenshot timed out")
         return False
 
-def _try_spectacle(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bool:
+def _try_spectacle(output_path: str, mode: CaptureMode, geometry: Optional[str], include_mouse: bool, env: Dict[str, str]) -> bool:
     """Attempt capture with spectacle (KDE-oriented)."""
     if not shutil.which("spectacle"):
         return False
@@ -286,23 +286,13 @@ def capture_screenshot(
                 logging.info("Selected region geometry: %s", resolved_geometry)
         # Attempt captures in order
         for method_func, method_name in capture_methods:
-            # Adjust parameters based on method (grim needs mode and geometry)
-            if method_name == "grim":
-                if method_func(output_path, capture_mode, resolved_geometry, include_mouse, env):
-                    if _is_image_black(output_path):
-                        logging.warning("Image appears to be black/failed, trying next method")
-                        continue
-                    logging.info("Capture succeeded with %s", method_name)
-                    success = True
-                    break
-            else:
-                if method_func(output_path, include_mouse, env):
-                    if _is_image_black(output_path):
-                        logging.warning("Image appears to be black/failed, trying next method")
-                        continue
-                    logging.info("Capture succeeded with %s", method_name)
-                    success = True
-                    break
+            if method_func(output_path, capture_mode, resolved_geometry, include_mouse, env):
+                if _is_image_black(output_path):
+                    logging.warning("Image appears to be black/failed, trying next method")
+                    continue
+                logging.info("Capture succeeded with %s", method_name)
+                success = True
+                break
         # Note: Window mode is not implemented per original code; skip for now
         if success:
             return {"success": True, "filename": output_path}

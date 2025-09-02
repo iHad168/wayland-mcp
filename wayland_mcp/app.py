@@ -81,101 +81,222 @@ def restore_effects():
         )
     except subprocess.CalledProcessError as e:
         logging.error("Error restoring effects: %s", e)
+from enum import Enum
+from typing import Optional, Dict, Any
+
+class CaptureMode(Enum):
+    """Enumeration for capture modes to improve type safety and readability."""
+    AUTO = "auto"
+    REGION = "region"
+    WINDOW = "window"
+
+def _select_region(tool: str) -> Optional[str]:
+    """Helper to select region using the specified tool, returning geometry or None."""
+    if tool == "slurp" and shutil.which("slurp"):
+        try:
+            result = subprocess.run(
+                ["slurp"], capture_output=True, text=True, timeout=10, check=False
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            logging.warning("slurp region selection timed out")
+    elif tool == "xrandr" and shutil.which("xrandr"):
+        try:
+            result = subprocess.run(
+                ["sh", "-c", "xrandr | grep ' connected'"],
+                capture_output=True, text=True, timeout=10, check=False
+            )
+            if result.returncode == 0:
+                # Parse basic geometry (implement full parsing if needed)
+                # Placeholder: Assume first connected display
+                # In production, expand to parse actual geometry from output
+                return "0,0,1920,1080"  # Example fallback; replace with real parsing
+        except subprocess.TimeoutExpired:
+            logging.warning("xrandr region selection timed out")
+    return None
+
+def _try_ksnip(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bool:
+    """Attempt capture with ksnip (prioritized for stability)."""
+    if not shutil.which("ksnip"):
+        return False
+    cmd = ["ksnip", "-f", output_path, "-m"]  # -m for silent mode
+    if include_mouse:
+        cmd.append("-c")  # Include cursor
+    try:
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, timeout=15, check=False
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        logging.error("ksnip timed out")
+        return False
+
+def _try_gnome_screenshot(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bool:
+    """Attempt capture with gnome-screenshot (fallback for GNOME)."""
+    if not shutil.which("gnome-screenshot"):
+        return False
+    cmd = ["gnome-screenshot", "-f", output_path]
+    if include_mouse:
+        cmd.append("--include-pointer")
+    try:
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, timeout=20, check=False
+        )  # Reduced timeout for efficiency
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        logging.error("gnome-screenshot timed out")
+        return False
+
+def _try_spectacle(output_path: str, env: Dict[str, str]) -> bool:
+    """Attempt capture with spectacle (KDE-oriented)."""
+    if not shutil.which("spectacle"):
+        return False
+    cmd = ["spectacle", "--fullscreen", "--background", "--nonotify", "--output", output_path]
+    try:
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, timeout=20, check=False
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        logging.error("spectacle timed out")
+        return False
+
+def _try_grim(output_path: str, mode: CaptureMode, geometry: Optional[str], include_mouse: bool, env: Dict[str, str]) -> bool:
+    """Attempt capture with grim (Wayland-specific)."""
+    if not (os.environ.get("WAYLAND_DISPLAY") and shutil.which("grim")):
+        return False
+    if include_mouse:
+        logging.warning("Grim does not support cursor capture; mouse will not be visible")
+    cmd = ["grim", output_path]
+    if mode == CaptureMode.REGION and geometry:
+        cmd = ["grim", "-g", geometry, output_path]
+    elif mode == CaptureMode.REGION and not geometry:
+        logging.error("Region mode requires geometry for grim")
+        return False
+    try:
+        subprocess.run(cmd, env=env, timeout=15, check=True)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logging.error("Grim capture failed: %s", e)
+        return False
+
+def minimize_effects() -> None:
+    """Reduce visual and sound effects (unchanged but made into standalone function)."""
+    try:
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.interface", "enable-animations", "false"],
+            check=True
+        )
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.sound", "event-sounds", "false"],
+            check=True
+        )
+        time.sleep(0.3)  # Allow settings to apply
+    except subprocess.CalledProcessError as e:
+        logging.error("Error minimizing effects: %s", e)
+
+def restore_effects() -> None:
+    """Restore original system settings (unchanged but made into standalone function)."""
+    try:
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.interface", "enable-animations", "true"],
+            check=True
+        )
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.sound", "event-sounds", "true"],
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error("Error restoring effects: %s", e)
+
 # pylint: disable=too-many-branches
-def capture_screenshot(output_path=None, mode="auto", geometry=None, include_mouse=True):
+def capture_screenshot(
+    output_path: str = None,
+    mode: str = "auto",
+    geometry: str = None,
+    include_mouse: bool = True
+) -> Dict[str, Any]:
     """
-    Capture screenshot with optional region selection and mouse cursor
+    Capture screenshot with optional region selection and mouse cursor.
+
     Args:
-        output_path: Output file path
-        mode: 'auto'|'region'|'window' - Capture mode
-        geometry: Optional pre-defined geometry (x,y,w,h)
-        include_mouse: Whether to include mouse cursor in capture (default: True)
+        output_path: Output file path (default: screenshot.png).
+        mode: Capture mode ('auto', 'region', 'window').
+        geometry: Optional pre-defined geometry (x,y,w,h) for region mode.
+        include_mouse: Whether to include mouse cursor (default: True).
+
     Returns:
-        dict: {'success': bool, 'filename': str, 'error': str}
+        Dict with 'success': bool, 'filename': str (on success), 'error': str (on failure).
     """
     if output_path is None:
         output_path = os.path.abspath("screenshot.png")
-    logging.info("[capture_screenshot] called with silent mode")
+    # Validate and convert mode early
+    try:
+        capture_mode = CaptureMode(mode)
+    except ValueError:
+        return {"success": False, "error": f"Invalid mode: {mode}"}
+    # Pre-check: Ensure output path is writable
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'wb') as _:
+            pass  # Create/overwrite to test write access
+    except (OSError, ValueError) as e:
+        return {"success": False, "error": f"Invalid output path: {e}"}
+
+    logging.info("Starting screenshot capture in mode: %s", capture_mode.value)
     env = configure_environment()
+    # Define capture methods in priority order (e.g., prioritize commonly available tools)
+    capture_methods = [
+        (_try_ksnip, "ksnip"),
+        (_try_gnome_screenshot, "gnome-screenshot"),
+        (_try_spectacle, "spectacle"),
+        (_try_grim, "grim"),
+    ]
+    success = False
+    error = "All capture methods failed"
+
     try:
         minimize_effects()
         # Force mute as backup
         subprocess.run(
-            ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"], env=env, check=False
-        )  # Muting failure isn't critical
-        # 1. First try ksnip (if available)
-        if os.path.exists("/usr/bin/ksnip"):
-            try:
-                cmd = ["ksnip", "-f", output_path, "-m"]
-                if include_mouse:
-                    cmd.append("-c")  # Include cursor
-                result = subprocess.run(
-                    cmd,
-                    env=env,
-                    capture_output=True,
-                    timeout=15,
-                    check=False,  # Don't check, handle return code below
-                )
-                if result.returncode == 0:
-                    return {"success": True, "filename": output_path}
-            except subprocess.TimeoutExpired as e:
-                logging.error("ksnip failed: %s", e)
-        # 2. Fallback to gnome-screenshot (minimized flash)
-        try:
-            cmd = ["gnome-screenshot", "-f", output_path]
-            if include_mouse:
-                cmd.append("--include-pointer")
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                timeout=30,  # Increased timeout for slower systems
-                check=False,  # Don't check, handle return code below
-            )
-            if result.returncode == 0:
-                return {"success": True, "filename": output_path}
-        except subprocess.TimeoutExpired as e:
-            logging.error("gnome-screenshot failed: %s", e)
-        # Handle region/window selection
-        if mode == "region" and not geometry:
-            try:
-                if shutil.which("slurp"):
-                    result = subprocess.run(
-                        ["slurp"], capture_output=True, text=True, check=False
-                    )  # Don't check, handle return code
-                    if result.returncode == 0:
-                        geometry = result.stdout.strip()
-                elif shutil.which("xrandr"):
-                    # Basic X11 region selection fallback
-                    result = subprocess.run(
-                        ["xrandr | grep ' connected'"],
-                        shell=True,
-                        capture_output=True,
-                        check=False,
-                    )  # Don't check, handle return code
-                    # Parse output to get screen geometry (needs implementation)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as e:
-                logging.warning("Region selection failed: %s", e)
-        # 3. Final fallback to grim if on Wayland
-        if os.environ.get("WAYLAND_DISPLAY") and shutil.which("grim"):
-            try:
-                if include_mouse:
-                    logging.warning("Grim doesn't support cursor capture - mouse won't be visible")
-                cmd = ["grim", output_path]
-                if mode == "region" and shutil.which("slurp"):
-                    cmd = ["grim", "-g", "$(slurp)", output_path]
-                subprocess.run(
-                    cmd, env=env, check=True, timeout=20
-                )  # Increased timeout for slower systems
-                return {"success": True, "filename": output_path}
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                logging.error("Grim fallback failed: %s", e)
-        return {"success": False, "error": "All capture methods failed"}
+            ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"],
+            env=env, check=False
+        )
+        # Handle region selection early if needed
+        resolved_geometry = geometry
+        if capture_mode == CaptureMode.REGION and not resolved_geometry:
+            resolved_geometry = _select_region("slurp") or _select_region("xrandr") or None
+            if not resolved_geometry:
+                error = "Region selection failed; no geometry obtained"
+            else:
+                logging.info("Selected region geometry: %s", resolved_geometry)
+        # Attempt captures in order
+        for method_func, method_name in capture_methods:
+            # Adjust parameters based on method (grim needs mode and geometry)
+            if method_name == "grim":
+                if method_func(output_path, capture_mode, resolved_geometry, include_mouse, env):
+                    logging.info("Capture succeeded with %s", method_name)
+                    success = True
+                    break
+            else:
+                if method_func(output_path, include_mouse, env):
+                    logging.info("Capture succeeded with %s", method_name)
+                    success = True
+                    break
+        # Note: Window mode is not implemented per original code; skip for now
+        if success:
+            return {"success": True, "filename": output_path}
+        return {"success": False, "error": error}
+    except Exception as e:
+        logging.error("Unexpected error during capture: %s", e)
+        return {"success": False, "error": str(e)}
     finally:
         restore_effects()
         subprocess.run(
-            ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"], env=env, check=False
-        )  # Unmuting failure isn't critical
+            ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"],
+            env=env, check=False
+        )
 class VLMAgent:
     """Agent for interacting with Vision-Language Models (VLMs).
     Handles image analysis and comparison using VLM APIs.

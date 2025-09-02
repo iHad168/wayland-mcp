@@ -83,6 +83,19 @@ def restore_effects():
         logging.error("Error restoring effects: %s", e)
 from enum import Enum
 from typing import Optional, Dict, Any
+from PIL import Image
+
+def _is_image_black(image_path: str, threshold: int = 10) -> bool:
+    """Check if image is mostly black (failed capture)"""
+    try:
+        img = Image.open(image_path)
+        # Convert to grayscale and get stats
+        gray = img.convert('L')
+        extrema = gray.getextrema()
+        return extrema[1] - extrema[0] < threshold  # Low contrast indicates black/failed
+    except Exception as e:
+        logging.warning("Could not check image content: %s", e)
+        return False  # Assume valid if we can't check
 
 class CaptureMode(Enum):
     """Enumeration for capture modes to improve type safety and readability."""
@@ -148,7 +161,7 @@ def _try_gnome_screenshot(output_path: str, include_mouse: bool, env: Dict[str, 
         logging.error("gnome-screenshot timed out")
         return False
 
-def _try_spectacle(output_path: str, env: Dict[str, str]) -> bool:
+def _try_spectacle(output_path: str, include_mouse: bool, env: Dict[str, str]) -> bool:
     """Attempt capture with spectacle (KDE-oriented)."""
     if not shutil.which("spectacle"):
         return False
@@ -276,11 +289,17 @@ def capture_screenshot(
             # Adjust parameters based on method (grim needs mode and geometry)
             if method_name == "grim":
                 if method_func(output_path, capture_mode, resolved_geometry, include_mouse, env):
+                    if _is_image_black(output_path):
+                        logging.warning("Image appears to be black/failed, trying next method")
+                        continue
                     logging.info("Capture succeeded with %s", method_name)
                     success = True
                     break
             else:
                 if method_func(output_path, include_mouse, env):
+                    if _is_image_black(output_path):
+                        logging.warning("Image appears to be black/failed, trying next method")
+                        continue
                     logging.info("Capture succeeded with %s", method_name)
                     success = True
                     break
